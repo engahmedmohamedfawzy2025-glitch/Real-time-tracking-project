@@ -1,11 +1,10 @@
-// Jenkinsfile - Declarative pipeline (compatible with agents that have Docker & aws cli)
+// Jenkinsfile - compatible with agents that DO NOT have Docker Pipeline plugin
 pipeline {
   agent any
 
   environment {
     ECR = '865503655419.dkr.ecr.eu-central-1.amazonaws.com'
     AWS_REGION = 'eu-central-1'
-    // GIT_COMMIT_SHORT will be set at runtime in the pipeline script
   }
 
   stages {
@@ -13,7 +12,6 @@ pipeline {
       steps {
         checkout scm
         script {
-          // set short commit hash in environment for tagging
           env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
           echo "Commit short: ${env.GIT_COMMIT_SHORT}"
         }
@@ -22,7 +20,6 @@ pipeline {
 
     stage('Login to ECR') {
       steps {
-        // assumes aws CLI is configured on the agent with proper creds/role
         sh """
           aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR}
         """
@@ -32,10 +29,10 @@ pipeline {
     stage('Build Backend') {
       steps {
         dir('app/backend') {
-          script {
-            // build Docker image for backend on the agent host
-            sh "docker build -t ${ECR}/rt-api:${GIT_COMMIT_SHORT} -t ${ECR}/rt-api:latest ."
-          }
+          sh """
+            echo "Building backend Docker image..."
+            docker build -t ${ECR}/rt-api:${GIT_COMMIT_SHORT} -t ${ECR}/rt-api:latest .
+          """
         }
       }
     }
@@ -43,18 +40,42 @@ pipeline {
     stage('Build Frontend') {
       steps {
         dir('app/frontend') {
-          script {
-            // Run frontend build inside official Node image so npm is available
-            docker.image('node:18-alpine').inside('-u root:root') {
-              // ensure we have correct permissions if writing build artifacts
-              sh '''
-                npm ci --silent
-                npm run build
-              '''
-            }
-            // Optional: if you have a Dockerfile for frontend and want to build an image:
-            // sh "docker build -t ${ECR}/rt-frontend:${GIT_COMMIT_SHORT} -t ${ECR}/rt-frontend:latest ."
-          }
+          // robust frontend build: use existing node/npm if available;
+          // otherwise try apt / yum / apk installers (common Linux distros),
+          // otherwise fail with clear message.
+          sh '''
+            echo "Preparing frontend build..."
+
+            if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 ; then
+              echo "Node and npm found: $(node -v) / $(npm -v)"
+            else
+              echo "Node/npm not found. Attempting to install Node 18..."
+              if command -v apt-get >/dev/null 2>&1 ; then
+                echo "Detected apt-get. Installing via NodeSource..."
+                curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - || { echo "NodeSource setup failed"; exit 1; }
+                sudo apt-get install -y nodejs || { echo "apt-get install nodejs failed"; exit 1; }
+              elif command -v yum >/dev/null 2>&1 ; then
+                echo "Detected yum. Installing via NodeSource..."
+                curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || { echo "NodeSource setup failed"; exit 1; }
+                sudo yum install -y nodejs || { echo "yum install nodejs failed"; exit 1; }
+              elif command -v apk >/dev/null 2>&1 ; then
+                echo "Detected apk (Alpine). Installing nodejs & npm via apk..."
+                sudo apk add --no-cache nodejs npm || { echo "apk add nodejs failed"; exit 1; }
+              else
+                echo "No supported package manager found (apt-get/yum/apk). Cannot install Node. Please ensure node/npm available on agent or install Node manually."
+                exit 2
+              fi
+              echo "Installed Node: $(node -v) / $(npm -v || echo 'npm not found')"
+            fi
+
+            echo "Running npm ci..."
+            npm ci --silent || { echo "npm ci failed"; exit 3; }
+
+            echo "Running frontend build..."
+            npm run build || { echo "npm run build failed"; exit 4; }
+
+            echo "Frontend build finished successfully."
+          '''
         }
       }
     }
@@ -62,11 +83,10 @@ pipeline {
     stage('Push Images') {
       steps {
         script {
-          // Push backend image(s)
+          echo "Pushing backend images to ECR..."
           sh "docker push ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
           sh "docker push ${ECR}/rt-api:latest"
-
-          // If you built a frontend image uncomment these lines above and push:
+          // Uncomment below lines if you build a frontend Docker image
           // sh "docker push ${ECR}/rt-frontend:${GIT_COMMIT_SHORT}"
           // sh "docker push ${ECR}/rt-frontend:latest"
         }
@@ -76,13 +96,12 @@ pipeline {
 
   post {
     success {
-      echo "✅ Pipeline succeeded. Images pushed: ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
+      echo "✅ Pipeline succeeded — pushed: ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
     }
     failure {
-      echo "❌ Pipeline failed — check the logs above."
+      echo "❌ Pipeline failed — check the stage logs above for error codes."
     }
     always {
-      // Optional cleanup if needed
       echo "Pipeline finished at: ${new Date()}"
     }
   }
