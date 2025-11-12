@@ -1,0 +1,9 @@
+terraform {
+  backend "s3" {
+    bucket         = "rt-tracking-tf-state-1731275678"  # غيّر بالاسم بتاعك
+    key            = "envs/dev/terraform.tfstate"
+    region         = "eu-central-1"
+    dynamodb_table = "rt-tracking-tf-lock"
+    encrypt        = true
+  }
+}

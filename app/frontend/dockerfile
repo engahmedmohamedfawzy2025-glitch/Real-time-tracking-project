@@ -1,0 +1,25 @@
+# ---------- Stage 1: Build (needs dev deps) ----------
+FROM node:20-alpine AS build
+WORKDIR /app
+
+# Install build tools (for some alpine images might need python/gcc for native modules)
+RUN apk add --no-cache libc6-compat
+
+# Copy package files first for caching
+COPY package*.json ./
+
+# Install ALL dependencies (including dev) because we need vite to build
+RUN npm ci
+
+# Copy source and run build
+COPY . .
+RUN npm run build
+
+# ---------- Stage 2: Production image (nginx) ----------
+FROM nginx:alpine
+# clear default content
+RUN rm -rf /usr/share/nginx/html/*
+# copy build output from previous stage
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
