@@ -1,4 +1,4 @@
-// Jenkinsfile - use docker run for frontend build (no Docker Pipeline plugin required)
+// Jenkinsfile - corrected: proper quoting, robust frontend docker run, good logging
 pipeline {
   agent any
 
@@ -40,25 +40,27 @@ pipeline {
     stage('Build Frontend') {
       steps {
         dir('app/frontend') {
-          // Use docker run to perform npm install & build inside node image
+          // Build frontend inside node:18-alpine; ensure both commands run inside container
+          // Run as root to avoid permission problems; use set -eux to show errors/commands
           sh '''
-            echo "Building frontend inside node:18-alpine container..."
+            echo "Building frontend inside node:18-alpine container (all commands run INSIDE container)..."
 
-            # run the node container mounting current workspace, execute npm commands
             docker run --rm \
               -v "$(pwd)":/app \
               -w /app \
-              -u "$(id -u)":"$(id -g)" \
               node:18-alpine \
-              sh -c "npm ci --silent && npm run build"
+              sh -c 'set -eux; \
+                     # optionally configure npm cache dir if needed: mkdir -p /tmp/npm-cache; export npm_config_cache=/tmp/npm-cache; \
+                     npm ci --silent; \
+                     npm run build'
 
-            status=$?
-            if [ $status -ne 0 ]; then
-              echo "Frontend build failed inside container (exit $status)"
-              exit $status
+            rc=$?
+            if [ $rc -ne 0 ]; then
+              echo "Frontend build FAILED inside container (exit code $rc)"
+              exit $rc
             fi
 
-            echo "Frontend build succeeded."
+            echo "Frontend build SUCCEEDED."
           '''
         }
       }
@@ -70,7 +72,7 @@ pipeline {
           echo "Pushing backend images to ECR..."
           sh "docker push ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
           sh "docker push ${ECR}/rt-api:latest"
-          // If you choose to dockerize frontend, build & push it here similarly.
+          // If you want to dockerize frontend, build & push here.
         }
       }
     }
