@@ -1,4 +1,4 @@
-// Jenkinsfile - compatible with agents that DO NOT have Docker Pipeline plugin
+// Jenkinsfile - use docker run for frontend build (no Docker Pipeline plugin required)
 pipeline {
   agent any
 
@@ -40,41 +40,25 @@ pipeline {
     stage('Build Frontend') {
       steps {
         dir('app/frontend') {
-          // robust frontend build: use existing node/npm if available;
-          // otherwise try apt / yum / apk installers (common Linux distros),
-          // otherwise fail with clear message.
+          // Use docker run to perform npm install & build inside node image
           sh '''
-            echo "Preparing frontend build..."
+            echo "Building frontend inside node:18-alpine container..."
 
-            if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 ; then
-              echo "Node and npm found: $(node -v) / $(npm -v)"
-            else
-              echo "Node/npm not found. Attempting to install Node 18..."
-              if command -v apt-get >/dev/null 2>&1 ; then
-                echo "Detected apt-get. Installing via NodeSource..."
-                curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - || { echo "NodeSource setup failed"; exit 1; }
-                sudo apt-get install -y nodejs || { echo "apt-get install nodejs failed"; exit 1; }
-              elif command -v yum >/dev/null 2>&1 ; then
-                echo "Detected yum. Installing via NodeSource..."
-                curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - || { echo "NodeSource setup failed"; exit 1; }
-                sudo yum install -y nodejs || { echo "yum install nodejs failed"; exit 1; }
-              elif command -v apk >/dev/null 2>&1 ; then
-                echo "Detected apk (Alpine). Installing nodejs & npm via apk..."
-                sudo apk add --no-cache nodejs npm || { echo "apk add nodejs failed"; exit 1; }
-              else
-                echo "No supported package manager found (apt-get/yum/apk). Cannot install Node. Please ensure node/npm available on agent or install Node manually."
-                exit 2
-              fi
-              echo "Installed Node: $(node -v) / $(npm -v || echo 'npm not found')"
+            # run the node container mounting current workspace, execute npm commands
+            docker run --rm \
+              -v "$(pwd)":/app \
+              -w /app \
+              -u "$(id -u)":"$(id -g)" \
+              node:18-alpine \
+              sh -c "npm ci --silent && npm run build"
+
+            status=$?
+            if [ $status -ne 0 ]; then
+              echo "Frontend build failed inside container (exit $status)"
+              exit $status
             fi
 
-            echo "Running npm ci..."
-            npm ci --silent || { echo "npm ci failed"; exit 3; }
-
-            echo "Running frontend build..."
-            npm run build || { echo "npm run build failed"; exit 4; }
-
-            echo "Frontend build finished successfully."
+            echo "Frontend build succeeded."
           '''
         }
       }
@@ -86,23 +70,15 @@ pipeline {
           echo "Pushing backend images to ECR..."
           sh "docker push ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
           sh "docker push ${ECR}/rt-api:latest"
-          // Uncomment below lines if you build a frontend Docker image
-          // sh "docker push ${ECR}/rt-frontend:${GIT_COMMIT_SHORT}"
-          // sh "docker push ${ECR}/rt-frontend:latest"
+          // If you choose to dockerize frontend, build & push it here similarly.
         }
       }
     }
   }
 
   post {
-    success {
-      echo "✅ Pipeline succeeded — pushed: ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
-    }
-    failure {
-      echo "❌ Pipeline failed — check the stage logs above for error codes."
-    }
-    always {
-      echo "Pipeline finished at: ${new Date()}"
-    }
+    success { echo "✅ Pipeline succeeded. Backend image pushed: ${ECR}/rt-api:${GIT_COMMIT_SHORT}" }
+    failure { echo "❌ Pipeline failed — check logs above for the failing stage." }
+    always { echo "Pipeline finished at: ${new Date()}" }
   }
 }
