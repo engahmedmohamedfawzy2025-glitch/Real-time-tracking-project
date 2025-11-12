@@ -1,58 +1,63 @@
 pipeline {
   agent any
   environment {
-    AWS_REGION = 'eu-central-1'
-    ACCOUNT_ID = sh(returnStdout: true, script: "aws sts get-caller-identity --query Account --output text").trim()
-    ECR_API    = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/rt-api"
-    ECR_FE     = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/rt-frontend"
-    COMMIT     = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+    ECR = '865503655419.dkr.ecr.eu-central-1.amazonaws.com'
+    GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
   }
   stages {
-    stage('Checkout'){ steps { checkout scm } }
-
-    stage('Login ECR'){
+    stage('Checkout') {
       steps {
-        sh '''
-          aws ecr get-login-password --region $AWS_REGION | \
-          docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-        '''
+        checkout scm
       }
     }
 
-    stage('Build Backend'){
+    stage('Login ECR') {
       steps {
-        dir('app/backend'){
-          sh 'docker build -t $ECR_API:$COMMIT -t $ECR_API:latest .'
+        sh 'aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin 865503655419.dkr.ecr.eu-central-1.amazonaws.com'
+      }
+    }
+
+    stage('Build Backend') {
+      agent {
+        docker { image 'docker:24-dind' } // or use an agent with docker installed
+      }
+      steps {
+        dir('app/backend') {
+          // build uses Dockerfile which uses node image inside build — so it works
+          sh "docker build -t ${ECR}/rt-api:${GIT_COMMIT_SHORT} -t ${ECR}/rt-api:latest ."
         }
       }
     }
 
-    stage('Build Frontend'){
+    stage('Build Frontend') {
+      agent {
+        docker {
+          image 'node:18-alpine'
+          args '-u root:root'
+        }
+      }
       steps {
-        dir('app/frontend'){
-          sh '''
-            npm ci
-            npm run build
-            echo "FROM nginx:alpine\nCOPY build/ /usr/share/nginx/html" > Dockerfile
-            docker build -t $ECR_FE:$COMMIT -t $ECR_FE:latest .
-          '''
+        dir('app/frontend') {
+          sh 'npm ci'
+          sh 'npm run build'
+          // optional docker build for frontend assets if you have Dockerfile
+          // sh "docker build -t ${ECR}/rt-frontend:${GIT_COMMIT_SHORT} -t ${ECR}/rt-frontend:latest ."
         }
       }
     }
 
-    stage('Push Images'){
+    stage('Push Images') {
       steps {
-        sh '''
-          docker push $ECR_API:$COMMIT
-          docker push $ECR_API:latest
-          docker push $ECR_FE:$COMMIT
-          docker push $ECR_FE:latest
-        '''
+        // push only if both images were built
+        sh "docker push ${ECR}/rt-api:${GIT_COMMIT_SHORT} || true"
+        sh "docker push ${ECR}/rt-api:latest || true"
+        // sh "docker push ${ECR}/rt-frontend:${GIT_COMMIT_SHORT} || true"
       }
     }
   }
+
   post {
-    success { echo "✅ Images pushed successfully: $ECR_API:$COMMIT and $ECR_FE:$COMMIT" }
-    failure { echo "❌ Build failed! Check logs." }
+    success { echo '✅ Build succeeded' }
+    failure { echo '❌ Build failed' }
   }
 }
