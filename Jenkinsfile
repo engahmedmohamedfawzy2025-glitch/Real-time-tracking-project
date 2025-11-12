@@ -1,63 +1,89 @@
+// Jenkinsfile - Declarative pipeline (compatible with agents that have Docker & aws cli)
 pipeline {
   agent any
+
   environment {
     ECR = '865503655419.dkr.ecr.eu-central-1.amazonaws.com'
-    GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+    AWS_REGION = 'eu-central-1'
+    // GIT_COMMIT_SHORT will be set at runtime in the pipeline script
   }
+
   stages {
     stage('Checkout') {
       steps {
         checkout scm
+        script {
+          // set short commit hash in environment for tagging
+          env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          echo "Commit short: ${env.GIT_COMMIT_SHORT}"
+        }
       }
     }
 
-    stage('Login ECR') {
+    stage('Login to ECR') {
       steps {
-        sh 'aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin 865503655419.dkr.ecr.eu-central-1.amazonaws.com'
+        // assumes aws CLI is configured on the agent with proper creds/role
+        sh """
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR}
+        """
       }
     }
 
     stage('Build Backend') {
-      agent {
-        docker { image 'docker:24-dind' } // or use an agent with docker installed
-      }
       steps {
         dir('app/backend') {
-          // build uses Dockerfile which uses node image inside build — so it works
-          sh "docker build -t ${ECR}/rt-api:${GIT_COMMIT_SHORT} -t ${ECR}/rt-api:latest ."
+          script {
+            // build Docker image for backend on the agent host
+            sh "docker build -t ${ECR}/rt-api:${GIT_COMMIT_SHORT} -t ${ECR}/rt-api:latest ."
+          }
         }
       }
     }
 
     stage('Build Frontend') {
-      agent {
-        docker {
-          image 'node:18-alpine'
-          args '-u root:root'
-        }
-      }
       steps {
         dir('app/frontend') {
-          sh 'npm ci'
-          sh 'npm run build'
-          // optional docker build for frontend assets if you have Dockerfile
-          // sh "docker build -t ${ECR}/rt-frontend:${GIT_COMMIT_SHORT} -t ${ECR}/rt-frontend:latest ."
+          script {
+            // Run frontend build inside official Node image so npm is available
+            docker.image('node:18-alpine').inside('-u root:root') {
+              // ensure we have correct permissions if writing build artifacts
+              sh '''
+                npm ci --silent
+                npm run build
+              '''
+            }
+            // Optional: if you have a Dockerfile for frontend and want to build an image:
+            // sh "docker build -t ${ECR}/rt-frontend:${GIT_COMMIT_SHORT} -t ${ECR}/rt-frontend:latest ."
+          }
         }
       }
     }
 
     stage('Push Images') {
       steps {
-        // push only if both images were built
-        sh "docker push ${ECR}/rt-api:${GIT_COMMIT_SHORT} || true"
-        sh "docker push ${ECR}/rt-api:latest || true"
-        // sh "docker push ${ECR}/rt-frontend:${GIT_COMMIT_SHORT} || true"
+        script {
+          // Push backend image(s)
+          sh "docker push ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
+          sh "docker push ${ECR}/rt-api:latest"
+
+          // If you built a frontend image uncomment these lines above and push:
+          // sh "docker push ${ECR}/rt-frontend:${GIT_COMMIT_SHORT}"
+          // sh "docker push ${ECR}/rt-frontend:latest"
+        }
       }
     }
   }
 
   post {
-    success { echo '✅ Build succeeded' }
-    failure { echo '❌ Build failed' }
+    success {
+      echo "✅ Pipeline succeeded. Images pushed: ${ECR}/rt-api:${GIT_COMMIT_SHORT}"
+    }
+    failure {
+      echo "❌ Pipeline failed — check the logs above."
+    }
+    always {
+      // Optional cleanup if needed
+      echo "Pipeline finished at: ${new Date()}"
+    }
   }
 }
